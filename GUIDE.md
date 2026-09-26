@@ -1,75 +1,91 @@
-# 🔐 Guide complet — Network Scanner & Security Dashboard
+# Guide technique — Network Scanner & Security Dashboard
 
-Ce guide te donne **toutes les étapes**, dans l'ordre, avec les explications techniques nécessaires pour comprendre *pourquoi* tu fais chaque chose (important pour un entretien où on te demandera d'expliquer ton projet).
+Ce document décrit les étapes de mise en place, le fonctionnement interne des différents modules, ainsi que les choix techniques du projet.
 
-⚠️ **Règle absolue** : ne scanne **que** ton propre réseau (ta box/routeur chez toi, ou un réseau pour lequel tu as une autorisation écrite). Scanner un réseau tiers sans autorisation est illégal en Tunisie comme ailleurs.
+Avertissement : l'utilisation de cet outil doit être limitée à des réseaux pour lesquels une autorisation explicite existe (réseau personnel ou réseau couvert par une autorisation écrite). Le scan d'un réseau tiers sans autorisation est illégal.
 
 ---
 
-## ÉTAPE 0 — Prérequis et environnement
+## 1. Prérequis et environnement
 
-### 0.1 Vérifier Python
+### 1.1 Version de Python requise
+
 ```bash
-python3 --version   # il te faut Python 3.9+
+python3 --version
 ```
 
-### 0.2 Créer un environnement virtuel (bonne pratique à mettre en avant sur ton CV)
+Python 3.9 ou supérieur est requis.
+
+### 1.2 Environnement virtuel
+
+L'utilisation d'un environnement virtuel isole les dépendances du projet de l'installation système.
+
 ```bash
 mkdir Network-Scanner && cd Network-Scanner
 python3 -m venv venv
 source venv/bin/activate      # Linux/Mac
-# venv\Scripts\activate       # Windows
+venv\Scripts\activate         # Windows
 ```
 
-### 0.3 Scapy a besoin de privilèges réseau bas niveau
-- **Linux/Mac** : tu devras lancer le scanner avec `sudo` (scapy envoie des trames Ethernet brutes → nécessite les capacités `CAP_NET_RAW`).
-- **Windows** : tu dois installer **Npcap** (https://npcap.com/#download) avant d'installer scapy, sinon `srp()` ne fonctionnera pas. Coche "Install Npcap in WinPcap API-compatible Mode" pendant l'installation.
+### 1.3 Privilèges réseau requis par Scapy
 
-### 0.4 Installer les dépendances
-Le fichier `requirements.txt` est fourni (voir plus bas). Installe avec :
+Scapy nécessite un accès bas niveau à la carte réseau pour la construction et l'envoi de trames.
+
+- Linux/Mac : le script doit être exécuté avec `sudo`, car l'envoi de trames Ethernet brutes requiert la capacité `CAP_NET_RAW`.
+- Windows : Npcap doit être installé avant l'installation de Scapy, faute de quoi la fonction `srp()` ne fonctionne pas. L'option "Install Npcap in WinPcap API-compatible Mode" doit être activée durant l'installation.
+
+### 1.4 Installation des dépendances
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 0.5 Trouver ta plage réseau
+### 1.5 Identification de la plage réseau locale
+
 ```bash
-ip addr show        # Linux : cherche ton IP locale, ex 192.168.1.42/24
+ip addr show        # Linux
 ifconfig             # Mac
 ipconfig              # Windows
 ```
-Si ton IP est `192.168.1.42/24`, ta plage réseau à scanner est `192.168.1.0/24`.
+
+Pour une IP locale de type `192.168.1.42/24`, la plage réseau correspondante est `192.168.1.0/24`.
 
 ---
 
-## ÉTAPE 1 — Comprendre le protocole ARP (fondement de la V1)
+## 2. Découverte des hôtes via ARP
 
-Sur un réseau local (LAN), la communication au niveau 2 (Ethernet) se fait via des **adresses MAC**, pas des IP. Pour savoir "quelle MAC correspond à quelle IP", chaque machine utilise le protocole **ARP (Address Resolution Protocol)** :
+Sur un réseau local, la résolution entre adresse IP et adresse MAC repose sur le protocole ARP (Address Resolution Protocol) :
 
-1. Une machine envoie une trame **ARP Request** en broadcast (`ff:ff:ff:ff:ff:ff`) : *"Qui a l'IP 192.168.1.5 ? Dis-le-moi."*
-2. La machine qui possède cette IP répond avec une **ARP Reply** contenant sa MAC.
+1. Une requête ARP est envoyée en broadcast (`ff:ff:ff:ff:ff:ff`), demandant quelle machine possède une IP donnée.
+2. La machine correspondante répond avec sa propre adresse MAC.
 
-**Astuce de scan** : si on envoie une ARP Request à *toutes* les IP possibles d'une plage (192.168.1.1 à 192.168.1.254), toutes les machines allumées vont répondre → on obtient la liste des appareils connectés, en quelques millisecondes, de façon beaucoup plus fiable qu'un ping (beaucoup de machines bloquent le ping ICMP mais ne peuvent pas ignorer une requête ARP si elles sont sur le même réseau).
+En envoyant une requête ARP à l'ensemble des adresses IP d'une plage réseau, l'ensemble des hôtes actifs peut être identifié en quelques millisecondes. Cette méthode est plus fiable qu'un scan ICMP classique, dans la mesure où de nombreux hôtes bloquent le ping mais ne peuvent pas ignorer une requête ARP provenant du même segment réseau.
 
-C'est exactement ce que fait `scanner.py` (fourni) avec Scapy :
+Implémentation dans `scanner.py` :
+
 ```python
-arp = ARP(pdst=ip_range)                     # "qui a cette IP ?"
-ether = Ether(dst="ff:ff:ff:ff:ff:ff")        # envoyer en broadcast Ethernet
-packet = ether/arp                             # empiler les couches (Ethernet + ARP)
-result = srp(packet, timeout=2, verbose=0)[0]  # envoyer et recevoir les réponses
+arp = ARP(pdst=ip_range)
+ether = Ether(dst="ff:ff:ff:ff:ff:ff")
+packet = ether/arp
+result = srp(packet, timeout=2, verbose=0)[0]
 ```
-`srp` = "send and receive packets at layer 2".
 
-### Tester la V1
+`srp` (send and receive packets) envoie les trames construites au niveau 2 et collecte les réponses.
+
+Exécution :
+
 ```bash
 sudo python3 scanner.py --range 192.168.1.0/24
 ```
-Tu dois voir une liste IP / MAC s'afficher.
+
+Le résultat attendu est une liste des couples IP / adresse MAC des hôtes actifs du réseau.
 
 ---
 
-## ÉTAPE 2 — Résolution du nom d'appareil
+## 3. Résolution du nom d'hôte
 
-Chaque IP peut avoir un nom d'hôte (hostname) publié via mDNS/NetBIOS/DNS local. On essaie une résolution DNS inverse :
+Une résolution DNS inverse est tentée pour chaque IP détectée :
+
 ```python
 import socket
 try:
@@ -77,25 +93,30 @@ try:
 except socket.herror:
     hostname = "Inconnu"
 ```
-Ça ne marche pas toujours (beaucoup d'appareils ne publient pas leur nom), c'est normal — dans ce cas affiche "Inconnu".
+
+Cette résolution échoue fréquemment, la plupart des appareils ne publiant pas de nom d'hôte résolvable localement ; dans ce cas, la valeur "Inconnu" est utilisée.
 
 ---
 
-## ÉTAPE 3 (Version 2) — Temps de réponse (ping) et fabricant (vendor)
+## 4. Temps de réponse et identification du fabricant
 
-### 3.1 Temps de réponse
-Avec scapy, tu peux mesurer le round-trip-time (RTT) directement à partir de la réponse ARP (différence de temps entre l'envoi et la réception), ou faire un ping ICMP classique avec la librairie `ping3` ou en appelant la commande système :
+### 4.1 Temps de réponse (RTT)
+
+Le round-trip-time peut être mesuré à partir de la différence entre l'envoi de la requête ARP et la réception de la réponse :
+
 ```python
 import time
 start = time.time()
-# ... envoi de la requête ARP pour cette IP précise ...
+# envoi de la requête ARP pour l'IP concernée
 rtt_ms = (time.time() - start) * 1000
 ```
 
-### 3.2 Fabricant de la carte réseau (MAC Vendor / OUI)
-Les 3 premiers octets d'une adresse MAC (l'**OUI**, Organizationally Unique Identifier) identifient le fabricant (Cisco, Samsung, TP-Link...). Deux approches :
+### 4.2 Identification du fabricant (OUI)
 
-**Option A — API en ligne (simple, nécessite Internet)** :
+Les trois premiers octets d'une adresse MAC constituent l'OUI (Organizationally Unique Identifier), qui identifie le fabricant de l'interface réseau.
+
+Option A — requête vers une API externe :
+
 ```python
 import requests
 def get_vendor(mac):
@@ -105,19 +126,21 @@ def get_vendor(mac):
     except requests.RequestException:
         return "Inconnu"
 ```
-⚠️ Cette API a un rate-limit gratuit (~1 requête/seconde) — utile pour un usage perso, pas pour scanner 1000 appareils d'affilée.
 
-**Option B — Base OUI locale (hors-ligne, plus pro)** :
-Télécharge la base IEEE (`https://standards-oui.ieee.org/oui/oui.txt`) et fais un lookup local dans un dictionnaire `{oui: vendor}`. C'est ce que font les vrais outils comme Nmap. Je te recommande cette option pour la V2 avancée — c'est un vrai plus sur un CV ("j'ai implémenté un lookup OUI local sans dépendance API externe").
+Cette API impose une limite de débit d'environ une requête par seconde en usage gratuit, ce qui la rend inadaptée à un scan de grande échelle.
 
-`utils.py` fourni implémente l'option A avec fallback, tu pourras évoluer vers B ensuite.
+Option B — base OUI locale : la base IEEE (`https://standards-oui.ieee.org/oui/oui.txt`) peut être téléchargée et utilisée pour un lookup hors-ligne, à la manière des outils de référence tels que Nmap. Cette approche est recommandée pour une version avancée du projet, dans la mesure où elle supprime la dépendance à un service externe.
+
+`utils.py` implémente l'option A avec repli sur "Inconnu" en cas d'échec.
 
 ---
 
-## ÉTAPE 4 (Version 3) — Scan de ports et détection de services
+## 5. Scan de ports et détection de services
 
-### 4.1 Principe du scan TCP Connect
-Pour chaque port à tester, on essaie d'ouvrir une connexion TCP complète (le "3-way handshake" : SYN → SYN-ACK → ACK). Si ça réussit, le port est **ouvert**.
+### 5.1 Principe du scan TCP Connect
+
+Pour chaque port testé, une connexion TCP complète est tentée (three-way handshake : SYN, SYN-ACK, ACK). Une connexion réussie indique un port ouvert.
+
 ```python
 import socket
 def is_port_open(ip, port, timeout=0.5):
@@ -125,10 +148,12 @@ def is_port_open(ip, port, timeout=0.5):
         s.settimeout(timeout)
         return s.connect_ex((ip, port)) == 0
 ```
-`connect_ex` retourne 0 si la connexion réussit, un code d'erreur sinon (contrairement à `connect()` qui lève une exception).
 
-### 4.2 Pourquoi le threading est indispensable ici
-Scanner les 65535 ports d'une seule IP en séquentiel, à ~0.5s de timeout chacun, prendrait **9 heures**. Avec du multithreading (ex. `ThreadPoolExecutor` à 100 threads), la même opération prend quelques secondes, car les connexions sont majoritairement en attente réseau (I/O bound) — le CPU peut gérer plusieurs sockets en parallèle.
+`connect_ex` retourne 0 en cas de succès et un code d'erreur en cas d'échec, sans lever d'exception.
+
+### 5.2 Justification du multithreading
+
+Un scan séquentiel de l'ensemble des 65535 ports d'une IP, avec un timeout de 0.5 seconde, nécessiterait environ neuf heures. L'opération étant majoritairement liée aux entrées-sorties réseau (I/O bound) plutôt qu'au calcul, un parallélisme via `ThreadPoolExecutor` permet de réduire cette durée à quelques secondes.
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
@@ -146,8 +171,10 @@ def scan_ports(ip, ports=COMMON_PORTS.keys(), max_workers=50):
     return open_ports
 ```
 
-### 4.3 Détection de service (banner grabbing)
-Une fois un port ouvert détecté, on peut souvent lire la "bannière" que le service envoie à la connexion pour l'identifier précisément :
+### 5.3 Identification de service (banner grabbing)
+
+Lorsqu'un port ouvert est détecté, la bannière renvoyée par le service à la connexion permet souvent de l'identifier précisément :
+
 ```python
 def grab_banner(ip, port, timeout=1):
     try:
@@ -158,37 +185,42 @@ def grab_banner(ip, port, timeout=1):
     except Exception:
         return ""
 ```
-Pour un premier jet, un simple dictionnaire "port → nom de service commun" (fourni dans `utils.py`) suffit largement, et tu ajoutes le banner grabbing en bonus si tu veux impressionner.
 
-### 4.4 Éthique / portée
-Documente bien dans ton README que le scan de ports ne doit être fait **que sur des machines t'appartenant**, et limite par défaut à une liste de ports "communs" (pas les 65535) pour rester rapide et raisonnable.
+Un dictionnaire associant chaque port courant à un nom de service (fourni dans `utils.py`) constitue une base suffisante ; le banner grabbing peut être ajouté en complément.
 
----
+### 5.4 Portée du scan
 
-## ÉTAPE 5 (Version 4) — Interface graphique (Tkinter)
-
-`gui.py` (fourni) fait :
-- Un tableau (`ttk.Treeview`) avec colonnes IP / Nom / MAC / Fabricant / État / Ports ouverts
-- Un bouton **"Scanner"** qui lance le scan **dans un thread séparé** (`threading.Thread`) pour ne pas geler l'interface pendant les quelques secondes de scan
-- Un compteur "Nombre d'appareils : X"
-- Une barre de statut ("Scan en cours...", "Scan terminé")
-
-Le point technique important à retenir (et à savoir expliquer) : **on ne doit jamais faire une opération longue (réseau, fichier, calcul) directement dans le thread principal de Tkinter**, sinon la fenêtre se fige. On lance le scan dans un thread, et on met à jour l'UI depuis ce thread via `root.after(0, callback)` pour rester thread-safe.
-
-Pour aller plus loin (V4+), tu pourras migrer vers **PySide6** (Qt) qui est plus moderne et permet des dashboards plus soignés (graphiques, thèmes sombres, icônes par type d'appareil).
+Le scan de ports doit être limité aux machines appartenant à l'utilisateur, et restreint par défaut à une liste de ports courants plutôt qu'à l'ensemble des 65535 ports, afin de rester rapide et raisonnable.
 
 ---
 
-## ÉTAPE 6 — Organisation Git / GitHub
+## 6. Interface graphique (Tkinter)
 
-### 6.1 Initialiser le dépôt local
+`gui.py` fournit :
+
+- un tableau (`ttk.Treeview`) avec les colonnes IP, nom, adresse MAC, fabricant, état, ports ouverts
+- un bouton de lancement du scan, exécuté dans un thread séparé (`threading.Thread`) afin de ne pas bloquer l'interface pendant l'exécution
+- un compteur d'appareils détectés
+- une barre de statut indiquant l'état du scan
+
+Une opération longue (réseau, fichier, calcul) ne doit jamais être exécutée dans le thread principal de Tkinter, sous peine de figer l'interface. Le scan est donc exécuté dans un thread dédié, et la mise à jour de l'interface depuis ce thread est effectuée via `root.after(0, callback)` pour rester thread-safe.
+
+Une migration vers PySide6 (Qt) constitue une évolution possible pour un dashboard plus élaboré (graphiques, thèmes, icônes par type d'appareil).
+
+---
+
+## 7. Organisation du dépôt Git
+
+### 7.1 Initialisation
+
 ```bash
 cd Network-Scanner
 git init
 git branch -M main
 ```
 
-### 6.2 Créer `.gitignore`
+### 7.2 Fichier .gitignore
+
 ```
 venv/
 __pycache__/
@@ -196,58 +228,55 @@ __pycache__/
 .DS_Store
 ```
 
-### 6.3 Premier commit
+### 7.3 Premier commit
+
 ```bash
 git add .
-git commit -m "V1: scan ARP du réseau local (IP + MAC)"
+git commit -m "V1: scan ARP du reseau local (IP + MAC)"
 ```
 
-### 6.4 Créer le dépôt sur GitHub
-Sur github.com → "New repository" → nom `Network-Scanner` → ne coche pas "Initialize with README" (tu en as déjà un) → crée.
+### 7.4 Création du dépôt distant
 
-### 6.5 Lier et pousser
+Sur GitHub, un nouveau dépôt est créé sans initialisation de README, un README étant déjà présent localement.
+
+### 7.5 Liaison et publication
+
 ```bash
-git remote add origin https://github.com/TON_PSEUDO/Network-Scanner.git
+git remote add origin https://github.com/<utilisateur>/Network-Scanner.git
 git push -u origin main
 ```
 
-### 6.6 Workflow recommandé (à documenter, ça montre une bonne pratique pro)
-Fais un commit par version, avec des messages clairs :
+### 7.6 Convention de commits
+
+Un commit par version, avec un message décrivant le contenu ajouté :
+
 ```bash
-git commit -m "V2: ajout ping RTT + fabricant MAC (OUI lookup)"
-git commit -m "V3: scan de ports + détection de services"
-git commit -m "V4: interface graphique Tkinter (dashboard)"
+git commit -m "V2: ajout RTT et identification du fabricant (OUI)"
+git commit -m "V3: scan de ports et detection de services"
+git commit -m "V4: interface graphique Tkinter"
 git push
 ```
-Optionnel mais valorisant sur un CV : utilise des **branches** (`feature/port-scan`) et des **Pull Requests** vers `main`, même en solo — ça montre que tu maîtrises un vrai workflow Git.
+
+L'utilisation de branches (`feature/port-scan`) et de pull requests vers `main`, même en développement individuel, reflète un usage professionnel de Git.
 
 ---
 
-## ÉTAPE 7 — Soigner le README
+## 8. Évolutions possibles
 
-Le `README.md` fourni contient déjà : description, installation, usage, roadmap, avertissement légal. Complète-le avec :
-- Un **GIF ou screenshot** du dashboard en action (utilise `LICEcap` ou `peek` pour un GIF)
-- Un badge de version Python (`https://img.shields.io/badge/python-3.9+-blue`)
-- Une section "Limites connues" (montre ta rigueur : ex. "ne fonctionne que sur IPv4, ne détecte pas les appareils avec ARP spoofing protection activée")
-
----
-
-## ÉTAPE 8 — Idées d'évolution (pour après, si tu veux aller plus loin pour ton PFE)
-
-- Export des résultats en CSV/JSON/PDF (génération de rapport automatique — tu as déjà cette compétence via ton labo pentest)
-- Alertes : détecter un **nouvel appareil** inconnu apparaissant sur le réseau (petit moteur de détection d'anomalie simple, base pour un futur mini-IDS)
-- Sauvegarde historique des scans dans SQLite (tu as déjà cette compétence via ton lab Android SQLite)
-- Passage à PySide6 pour un dashboard plus pro avec graphiques (nombre d'appareils dans le temps)
-- Version suivante logique : mini-IDS qui surveille le trafic ARP en continu pour détecter de l'**ARP spoofing** (attaque très classique, en lien direct avec ton cours réseau-sécurité)
+- Export des résultats en CSV, JSON ou PDF
+- Détection d'un nouvel appareil apparaissant sur le réseau
+- Historisation des scans dans une base SQLite
+- Migration vers PySide6 pour un dashboard avec graphiques
+- Surveillance continue du trafic ARP pour la détection d'ARP spoofing
 
 ---
 
-## Dépannage courant
+## 9. Dépannage
 
 | Problème | Cause probable | Solution |
 |---|---|---|
-| `PermissionError` sur `srp()` | Pas de droits root | Lance avec `sudo` |
-| Scapy ne trouve aucun appareil | Mauvaise interface réseau sélectionnée | Précise l'interface avec `iface="eth0"` dans `srp()` |
+| `PermissionError` sur `srp()` | Absence de droits root | Exécuter avec `sudo` |
+| Aucun appareil détecté | Interface réseau incorrecte | Préciser l'interface via `iface="eth0"` dans `srp()` |
 | Aucun résultat sous Windows | Npcap non installé | Installer Npcap en mode compatible WinPcap |
-| `requests.exceptions.Timeout` sur le vendor lookup | API macvendors.com rate-limitée | Ajoute un `time.sleep(1)` entre appels ou passe à la base OUI locale |
-| L'interface Tkinter se fige pendant le scan | Scan lancé dans le thread principal | Vérifie que le scan tourne bien dans un `threading.Thread` (voir gui.py) |
+| `requests.exceptions.Timeout` sur la recherche de fabricant | Limitation de débit de l'API macvendors.com | Ajouter un délai entre les appels ou utiliser une base OUI locale |
+| Interface Tkinter figée pendant le scan | Scan exécuté dans le thread principal | Vérifier que le scan s'exécute dans un `threading.Thread` (voir gui.py) |
